@@ -1,20 +1,23 @@
-use std::{collections::HashMap, iter::zip, rc::Rc};
+use std::{collections::HashMap, iter::zip, path::Path, rc::Rc};
 
 use inkwell::{
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
+    execution_engine::JitFunction,
     module::Module,
+    targets::{InitializationConfig, Target, TargetMachine},
     types::IntType,
-    values::{IntValue, PhiValue},
-    AddressSpace, IntPredicate,
+    values::{FunctionValue, IntValue, PhiValue},
+    AddressSpace, IntPredicate, OptimizationLevel,
 };
 
 type Label<'a> = (BasicBlock<'a>, BasicBlock<'a>);
 
 pub struct Converter<'a> {
-    context: Rc<Context>,
+    context: &'a Context,
     module: Module<'a>,
+    main: FunctionValue<'a>,
     builder: Builder<'a>,
     variables: Vec<Vec<IntValue<'a>>>,
     phis: Vec<(Vec<PhiValue<'a>>, Label<'a>)>,
@@ -25,13 +28,12 @@ pub struct Converter<'a> {
 }
 
 impl<'a> Converter<'a> {
-    pub fn new(varis: Vec<Rc<str>>) -> Converter<'a> {
-        let context = Rc::new(Context::create());
-        let module = context.create_module("bbvm");
+    pub fn new(varis: Vec<Rc<str>>, context: &'a Context) -> Converter<'a> {
+        let module: Module<'a> = context.create_module("bbvm");
         let l128 = context.i128_type();
         let one = l128.const_int(1, false);
         let zero = l128.const_zero();
-        let main = module.add_function("main", l128.fn_type(&[], false), None);
+        let main = module.add_function("main", context.void_type().fn_type(&[], false), None);
         let block = context.append_basic_block(main, "entry");
         let builder = context.create_builder();
         builder.position_at_end(block);
@@ -40,11 +42,12 @@ impl<'a> Converter<'a> {
         let phis = vec![];
         let mut mapping = HashMap::new();
         for v in varis.iter().enumerate() {
-            mapping.insert(*v.1, v.0);
+            mapping.insert(v.1.clone(), v.0);
         }
         Converter {
             context,
             module,
+            main,
             builder,
             variables,
             phis,
@@ -56,7 +59,7 @@ impl<'a> Converter<'a> {
     }
 
     // var = var + 1
-    pub fn addIncr(&mut self, var: Rc<str>) -> () {
+    pub fn add_incr(&mut self, var: Rc<str>) -> () {
         let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
         let pos = self.mapping[&var];
 
@@ -66,25 +69,17 @@ impl<'a> Converter<'a> {
     // if var != 0 {
     //   var = var - 1
     // }
-    pub fn addDecr(&mut self, var: Rc<str>) -> () {
+    pub fn add_decr(&mut self, var: Rc<str>) -> () {
         let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
         let pos = self.mapping[&var];
 
         let current = vars[pos];
 
-        let cmp = self.builder.build_int_compare(
-            IntPredicate::EQ,
-            current,
-            self.l128.const_zero(),
-            "cmp_to_0",
-        );
-
-        let main = self
+        let cmp = self
             .builder
-            .get_insert_block()
-            .unwrap()
-            .get_parent()
-            .unwrap();
+            .build_int_compare(IntPredicate::EQ, current, self.zero, "cmp_to_0");
+
+        let main = self.main;
 
         let skip = self.context.append_basic_block(main, "alreadyZero");
         let no_skip = self.context.append_basic_block(main, "notZero");
@@ -105,24 +100,19 @@ impl<'a> Converter<'a> {
     }
 
     // var = 0
-    pub fn addClear(&mut self, var: Rc<str>) -> () {
+    pub fn add_clear(&mut self, var: Rc<str>) -> () {
         let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
-        vars[self.mapping[&var]] = self.l128.const_zero();
+        vars[self.mapping[&var]] = self.zero;
     }
 
     // to = from
-    pub fn addCopy(&mut self, from: Rc<str>, to: Rc<str>) -> () {
+    pub fn add_copy(&mut self, from: Rc<str>, to: Rc<str>) -> () {
         let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
         vars[self.mapping[&to]] = vars[self.mapping[&from]];
     }
 
-    pub fn addWhile<'b>(&mut self, var: Rc<str>, check: i128) -> () {
-        let main = self
-            .builder
-            .get_insert_block()
-            .unwrap()
-            .get_parent()
-            .unwrap();
+    pub fn add_while<'b>(&'b mut self, var: Rc<str>, check: i128) -> () {
+        let main = self.main;
         let lop = self.context.append_basic_block(main, "loop");
         self.builder.build_unconditional_branch(lop);
         self.builder.position_at_end(lop);
@@ -153,7 +143,7 @@ impl<'a> Converter<'a> {
         self.phis.push((phis, (lop, exit)));
     }
 
-    pub fn addEnd(&mut self) -> () {
+    pub fn add_end(&mut self) -> () {
         let (phis, (start, end)) = self
             .phis
             .pop()
@@ -161,7 +151,7 @@ impl<'a> Converter<'a> {
         self.builder.build_unconditional_branch(start);
         self.builder.position_at_end(end);
         let vars = self.variables.pop().expect("ERROR stack frame empty!");
-        for (phi, var) in zip(phis, vars) {
+        for (phi, var) in zip(&phis, vars) {
             phi.add_incoming(&[(&var, self.builder.get_insert_block().unwrap())]);
         }
         self.variables.push(
@@ -170,7 +160,7 @@ impl<'a> Converter<'a> {
                 .collect(),
         );
     }
-    pub fn addEOF(&mut self) -> () {
+    pub fn add_eof<'b>(&'b mut self) -> () {
         if self.phis.len() > 0 {
             panic!("Too many opening while loops!")
         }
@@ -188,7 +178,7 @@ impl<'a> Converter<'a> {
             false,
         );
         let printf = self.module.add_function("printf", fun, None);
-        for var in self.mapping.iter() {
+        for var in &self.mapping {
             let fmt = self
                 .builder
                 .build_global_string_ptr(format!("{}: %lld\n", var.0).as_str(), "");
@@ -203,6 +193,59 @@ impl<'a> Converter<'a> {
         }
 
         self.builder.build_return(None);
-        //self.module.verify().unwrap();
+        self.module.verify().unwrap();
+    }
+
+    pub fn run(&mut self) -> () {
+        let execution_engine = self
+            .module
+            .create_jit_execution_engine(OptimizationLevel::Aggressive)
+            .expect("Unable to create execution engine");
+        self.module.print_to_stderr();
+        unsafe {
+            let main: JitFunction<unsafe extern "C" fn() -> ()> = execution_engine
+                .get_function("main")
+                .expect("Unable to load function");
+            main.call();
+        }
+    }
+
+    pub fn dump_code(&mut self) -> () {
+        Target::initialize_native(&InitializationConfig::default())
+            .expect("Failed to initialize llvm");
+        let target = Target::get_first().expect("Could not find target");
+
+        let target_machine = target
+            .create_target_machine(
+                &TargetMachine::get_default_triple(),
+                TargetMachine::get_host_cpu_name()
+                    .as_ref()
+                    .to_str()
+                    .unwrap(),
+                TargetMachine::get_host_cpu_features()
+                    .as_ref()
+                    .to_str()
+                    .unwrap(),
+                OptimizationLevel::Aggressive,
+                inkwell::targets::RelocMode::Default,
+                inkwell::targets::CodeModel::Default,
+            )
+            .expect("Could not make target machine");
+
+        target_machine
+            .write_to_file(
+                &self.module,
+                inkwell::targets::FileType::Object,
+                &Path::new("./out.o"),
+            )
+            .unwrap();
+
+        target_machine
+            .write_to_file(
+                &self.module,
+                inkwell::targets::FileType::Assembly,
+                &Path::new("./out.asm"),
+            )
+            .unwrap();
     }
 }

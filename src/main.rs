@@ -1,53 +1,20 @@
 #![feature(iter_zip)]
 
 use clap::{crate_authors, crate_description, crate_name, crate_version, App};
-use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::execution_engine::{ExecutionEngine, JitFunction};
-use inkwell::module::Module;
-use inkwell::OptimizationLevel;
-use std::error::Error;
+use std::fs;
+use std::rc::Rc;
+
+use crate::convert::Converter;
+use crate::lexer::Lexer;
+use crate::token::{Statement, StatementImpl};
 
 mod convert;
 mod lexer;
 mod token;
 
-/// Convenience type alias for the `sum` function.
-///
-/// Calling this is innately `unsafe` because there's no guarantee it doesn't
-/// do `unsafe` operations internally.
-type SumFunc = unsafe extern "C" fn(u64, u64, u64) -> u64;
-
-struct CodeGen<'ctx> {
-    context: &'ctx Context,
-    module: Module<'ctx>,
-    builder: Builder<'ctx>,
-    execution_engine: ExecutionEngine<'ctx>,
-}
-
-impl<'ctx> CodeGen<'ctx> {
-    fn jit_compile_sum(&self) -> Option<JitFunction<SumFunc>> {
-        let i64_type = self.context.i64_type();
-        let fn_type = i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
-        let function = self.module.add_function("sum", fn_type, None);
-        let basic_block = self.context.append_basic_block(function, "entry");
-
-        self.builder.position_at_end(basic_block);
-
-        let x = function.get_nth_param(0)?.into_int_value();
-        let y = function.get_nth_param(1)?.into_int_value();
-        let z = function.get_nth_param(2)?.into_int_value();
-
-        let sum = self.builder.build_int_add(x, y, "sum");
-        let sum = self.builder.build_int_add(sum, z, "sum");
-
-        self.builder.build_return(Some(&sum));
-
-        unsafe { self.execution_engine.get_function("sum").ok() }
-    }
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> () {
+    let starttime = chrono::Utc::now();
     let matches = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
@@ -56,28 +23,74 @@ fn main() -> Result<(), Box<dyn Error>> {
         .arg("<INPUT>  'Sets the input file to use'")
         .get_matches();
 
-    let context = Context::create();
-    let module = context.create_module("sum");
-    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::None)?;
-    let codegen = CodeGen {
-        context: &context,
-        module,
-        builder: context.create_builder(),
-        execution_engine,
-    };
+    let compile = matches.value_of("-c").is_some();
+    let filename = matches.value_of("<INPUT>").unwrap();
 
-    let sum = codegen
-        .jit_compile_sum()
-        .ok_or("Unable to JIT compile `sum`")?;
+    let file = fs::read_to_string(filename).expect("Failed to read the file");
+    let mut l = Lexer::new(&file);
 
-    let x = 1u64;
-    let y = 2u64;
-    let z = 3u64;
-
-    unsafe {
-        println!("{} + {} + {} = {}", x, y, z, sum.call(x, y, z));
-        assert_eq!(sum.call(x, y, z), x + y + z);
+    println!("Interpreting file...");
+    let mut tokens: Vec<Statement> = vec![];
+    loop {
+        let statement = l.get_token().try_into().unwrap();
+        if statement == Statement::EOF {
+            break;
+        }
+        tokens.push(statement);
     }
 
-    Ok(())
+    let variables: Vec<Rc<str>> = tokens
+        .iter()
+        .flat_map(|t| {
+            use Statement::*;
+            match t {
+                EOF | Fluff | End => {
+                    vec![]
+                }
+                While(v) => v.get_variables(),
+                OneParam(v) => v.get_variables(),
+                TwoParam(v) => v.get_variables(),
+            }
+        })
+        .collect();
+    let context = Context::create();
+    let mut converter = Converter::new(variables, &context);
+
+    println!("Generating LLVM IR...");
+    for statement in tokens {
+        use Statement::*;
+        match statement {
+            EOF | Fluff | End => {}
+            While(v) => v.compile(&mut converter),
+            OneParam(v) => v.compile(&mut converter),
+            TwoParam(v) => v.compile(&mut converter),
+        }
+    }
+
+    let endtime1 = chrono::Utc::now();
+    let duration = endtime1 - starttime;
+
+    println!(
+        "LLVM IR compile took {} nanoseconds ({} milliseconds).",
+        duration.num_nanoseconds().unwrap_or_default(),
+        duration.num_milliseconds()
+    );
+
+    if compile {
+        println!("Running normal compiler...");
+
+        converter.dump_code();
+
+        cc::Build::new().file("./out.o").compile("out");
+    } else {
+        println!("Running JIT compiler...");
+
+        converter.run();
+    }
+
+    println!(
+        "LLVM IR execution took {} nanoseconds ({} milliseconds).",
+        duration.num_nanoseconds().unwrap_or_default(),
+        duration.num_milliseconds()
+    );
 }

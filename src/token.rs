@@ -32,7 +32,7 @@ macro_rules! statement_token {
 }
 
 pub trait TokenImpl {
-    fn identify(ident: &str) -> bool {
+    fn identify(_: &str) -> bool {
         false
     }
 }
@@ -49,10 +49,10 @@ pub enum Token {
     EOF,
 }
 pub trait StatementImpl {
-    fn getVariables(&self) -> Vec<Rc<str>> {
+    fn get_variables(&self) -> Vec<Rc<str>> {
         vec![]
     }
-    fn compile(&self, cont: Rc<Converter>) -> () {}
+    fn compile(&self, _: &mut Converter) -> () {}
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,32 +65,50 @@ pub enum Statement {
     EOF,
 }
 
+impl TryFrom<Token> for Statement {
+    fn try_from(t: Token) -> Result<Self, Self::Error> {
+        use Token::*;
+        match t {
+            Number(_) => Err("Number is not a statement!"),
+            Identifier(_) => Err("Identifier is not a statement!"),
+            While(v) => Ok(Statement::While(v)),
+            OneParam(v) => Ok(Statement::OneParam(v)),
+            TwoParam(v) => Ok(Statement::TwoParam(v)),
+            Fluff => Ok(Statement::Fluff),
+            End => Ok(Statement::End),
+            EOF => Ok(Statement::EOF),
+        }
+    }
+
+    type Error = &'static str;
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Identifier {
-    ident: Rc<str>,
+    pub ident: Rc<str>,
 }
 
 matches_token!("[a-zA-Z]\\w*", Identifier);
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Number {
-    value: i128,
+    pub value: i128,
 }
 
 matches_token!("\\d+", Number);
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct While {
-    param: Identifier,
-    num: Number,
+    pub param: Identifier,
+    pub num: Number,
 }
 
 impl StatementImpl for While {
-    fn getVariables(&self) -> Vec<Rc<str>> {
+    fn get_variables(&self) -> Vec<Rc<str>> {
         vec![self.param.ident.clone()]
     }
-    fn compile(&self, cont: Rc<Converter>) -> () {
-        cont.addWhile(self.param.ident.clone(), self.num.value.clone());
+    fn compile(&self, cont: &mut Converter) -> () {
+        cont.add_while(self.param.ident.clone(), self.num.value.clone());
     }
 }
 
@@ -118,18 +136,18 @@ impl FromStr for TwoParamType {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TwoParam {
-    one: Identifier,
-    two: Identifier,
-    ty: TwoParamType,
+    pub one: Identifier,
+    pub two: Identifier,
+    pub ty: TwoParamType,
 }
 
 impl StatementImpl for TwoParam {
-    fn getVariables(&self) -> Vec<Rc<str>> {
-        vec![self.one.ident, self.two.ident]
+    fn get_variables(&self) -> Vec<Rc<str>> {
+        vec![self.one.ident.clone(), self.two.ident.clone()]
     }
-    fn compile(&self, cont: Rc<Converter>) -> () {
+    fn compile(&self, cont: &mut Converter) -> () {
         match self.ty {
-            TwoParamType::Copy => cont.addCopy(self.one.ident, self.two.ident),
+            TwoParamType::Copy => cont.add_copy(self.one.ident.clone(), self.two.ident.clone()),
         }
     }
 }
@@ -158,19 +176,19 @@ impl FromStr for OneParamType {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OneParam {
-    one: Identifier,
-    ty: OneParamType,
+    pub one: Identifier,
+    pub ty: OneParamType,
 }
 
 impl StatementImpl for OneParam {
-    fn getVariables(&self) -> Vec<Rc<str>> {
-        vec![self.one.ident]
+    fn get_variables(&self) -> Vec<Rc<str>> {
+        vec![self.one.ident.clone()]
     }
-    fn compile(&self, cont: Rc<Converter>) -> () {
+    fn compile(&self, cont: &mut Converter) -> () {
         match self.ty {
-            OneParamType::Clear => cont.addClear(self.one.ident),
-            OneParamType::Decr => cont.addDecr(self.one.ident),
-            OneParamType::Incr => cont.addIncr(self.one.ident),
+            OneParamType::Clear => cont.add_clear(self.one.ident.clone()),
+            OneParamType::Decr => cont.add_decr(self.one.ident.clone()),
+            OneParamType::Incr => cont.add_incr(self.one.ident.clone()),
         }
     }
 }
@@ -190,8 +208,8 @@ pub struct End {}
 statement_token!(["end"], End);
 
 impl StatementImpl for End {
-    fn compile(&self, cont: Rc<Converter>) -> () {
-        cont.addEnd()
+    fn compile(&self, cont: &mut Converter) -> () {
+        cont.add_end()
     }
 }
 
@@ -199,13 +217,13 @@ impl StatementImpl for End {
 pub struct EOF {}
 
 impl TokenImpl for EOF {
-    fn identify(ident: &str) -> bool {
+    fn identify(_: &str) -> bool {
         true
     }
 }
 
 impl StatementImpl for EOF {
-    fn compile(&self, cont: Rc<Converter>) -> () {
-        cont.addEOF()
+    fn compile(&self, cont: &mut Converter) -> () {
+        cont.add_eof()
     }
 }

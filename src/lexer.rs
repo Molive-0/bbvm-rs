@@ -13,7 +13,7 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(input: &str) -> Lexer {
+    pub fn new(input: &str) -> Lexer {
         Lexer { input }
     }
 
@@ -25,7 +25,7 @@ impl<'a> Lexer<'a> {
         t
     }
 
-    fn get_token(&mut self) -> Token {
+    pub fn get_token(&mut self) -> Token {
         let token;
         loop {
             if self.input.is_empty() {
