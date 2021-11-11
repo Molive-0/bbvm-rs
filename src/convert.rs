@@ -1,4 +1,4 @@
-use std::{collections::HashMap, iter::zip, path::Path, rc::Rc};
+use std::{collections::HashMap, io::Write, iter::zip, path::Path};
 
 use inkwell::{
     basic_block::BasicBlock,
@@ -19,29 +19,36 @@ pub struct Converter<'a> {
     module: Module<'a>,
     main: FunctionValue<'a>,
     builder: Builder<'a>,
-    variables: Vec<Vec<IntValue<'a>>>,
+    variables: Vec<IntValue<'a>>,
     phis: Vec<(Vec<PhiValue<'a>>, Label<'a>)>,
-    mapping: HashMap<Rc<str>, usize>,
+    mapping: HashMap<&'a str, usize>,
     one: IntValue<'a>,
     zero: IntValue<'a>,
-    l128: IntType<'a>,
+    l64: IntType<'a>,
+    block: BasicBlock<'a>,
 }
 
 impl<'a> Converter<'a> {
-    pub fn new(varis: Vec<Rc<str>>, context: &'a Context) -> Converter<'a> {
+    pub fn new(varis: Vec<&'a str>, context: &'a Context) -> Converter<'a> {
         let module: Module<'a> = context.create_module("bbvm");
-        let l128 = context.i128_type();
-        let one = l128.const_int(1, false);
-        let zero = l128.const_zero();
+        let l64 = context.i64_type();
+        let one = l64.const_int(1, false);
+        let zero = l64.const_zero();
         let main = module.add_function("main", context.void_type().fn_type(&[], false), None);
         let block = context.append_basic_block(main, "entry");
         let builder = context.create_builder();
         builder.position_at_end(block);
 
-        let variables = vec![vec![l128.const_int(0, false); varis.len()]];
+        let mut varib = varis;
+        varib.sort();
+        varib.dedup();
+        let varib = varib;
+
+        let variables = vec![l64.const_int(0, false); varib.len()];
+
         let phis = vec![];
         let mut mapping = HashMap::new();
-        for v in varis.iter().enumerate() {
+        for v in varib.iter().enumerate() {
             mapping.insert(v.1.clone(), v.0);
         }
         Converter {
@@ -54,26 +61,27 @@ impl<'a> Converter<'a> {
             mapping,
             one,
             zero,
-            l128,
+            l64,
+            block,
         }
     }
 
     // var = var + 1
-    pub fn add_incr(&mut self, var: Rc<str>) -> () {
-        let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
+    pub fn add_incr<'b: 'a>(&mut self, var: &'b str) -> () {
         let pos = self.mapping[&var];
 
-        vars[pos] = self.builder.build_int_add(vars[pos], self.one, "incr");
+        self.variables[pos] = self
+            .builder
+            .build_int_add(self.variables[pos], self.one, "incr");
     }
 
     // if var != 0 {
     //   var = var - 1
     // }
-    pub fn add_decr(&mut self, var: Rc<str>) -> () {
-        let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
+    pub fn add_decr<'b: 'a>(&mut self, var: &'b str) -> () {
         let pos = self.mapping[&var];
 
-        let current = vars[pos];
+        let current = self.variables[pos];
 
         let cmp = self
             .builder
@@ -90,49 +98,49 @@ impl<'a> Converter<'a> {
         self.builder.build_unconditional_branch(skip);
 
         self.builder.position_at_end(skip);
-        let res = self.builder.build_phi(self.l128, "result");
-        res.add_incoming(&[
-            (&current, self.builder.get_insert_block().unwrap()),
-            (&new_var, no_skip),
-        ]);
+        let res = self.builder.build_phi(self.l64, "result");
+        res.add_incoming(&[(&current, self.block), (&new_var, no_skip)]);
 
-        vars[pos] = res.as_basic_value().into_int_value();
+        self.block = skip;
+
+        self.variables[pos] = res.as_basic_value().into_int_value();
     }
 
     // var = 0
-    pub fn add_clear(&mut self, var: Rc<str>) -> () {
-        let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
-        vars[self.mapping[&var]] = self.zero;
+    pub fn add_clear<'b: 'a>(&mut self, var: &'b str) -> () {
+        self.variables[self.mapping[&var]] = self.zero;
     }
 
     // to = from
-    pub fn add_copy(&mut self, from: Rc<str>, to: Rc<str>) -> () {
-        let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
-        vars[self.mapping[&to]] = vars[self.mapping[&from]];
+    pub fn add_copy<'b: 'a>(&mut self, from: &'b str, to: &'b str) -> () {
+        self.variables[self.mapping[&to]] = self.variables[self.mapping[&from]];
     }
 
-    pub fn add_while<'b>(&'b mut self, var: Rc<str>, check: i128) -> () {
+    pub fn add_while<'b: 'a>(&mut self, var: &'b str, check: i128) -> () {
         let main = self.main;
         let lop = self.context.append_basic_block(main, "loop");
         self.builder.build_unconditional_branch(lop);
         self.builder.position_at_end(lop);
 
-        let vars = self.variables.last_mut().expect("ERROR stack frame empty!");
-        let phis = vars
+        let phis = self
+            .variables
             .iter()
             .map(|var| {
-                let rf = self.builder.build_phi(self.l128, "whilePhi");
-                rf.add_incoming(&[(var, self.builder.get_insert_block().unwrap())]);
+                let rf = self.builder.build_phi(self.l64, "whilePhi");
+                rf.add_incoming(&[(var, self.block)]);
                 rf
             })
             .collect::<Vec<PhiValue>>();
 
+        self.variables = phis
+            .iter()
+            .map(|phi| phi.as_basic_value().into_int_value())
+            .collect::<Vec<IntValue>>();
+
         let cmp = self.builder.build_int_compare(
             IntPredicate::EQ,
-            phis[self.mapping[var.as_ref()]]
-                .as_basic_value()
-                .into_int_value(),
-            self.l128.const_int(check as u64, false),
+            self.variables[self.mapping[&var]],
+            self.l64.const_int(check as u64, false),
             "exitCondition",
         );
         let inner_loop = self.context.append_basic_block(main, "innerLoop");
@@ -140,6 +148,7 @@ impl<'a> Converter<'a> {
         self.builder.build_conditional_branch(cmp, exit, inner_loop);
         self.builder.position_at_end(inner_loop);
 
+        self.block = inner_loop;
         self.phis.push((phis, (lop, exit)));
     }
 
@@ -150,22 +159,18 @@ impl<'a> Converter<'a> {
             .expect("ERROR: Phis list empty (too many \"end\"s?)");
         self.builder.build_unconditional_branch(start);
         self.builder.position_at_end(end);
-        let vars = self.variables.pop().expect("ERROR stack frame empty!");
-        for (phi, var) in zip(&phis, vars) {
-            phi.add_incoming(&[(&var, self.builder.get_insert_block().unwrap())]);
+        for (phi, var) in zip(&phis, &self.variables) {
+            phi.add_incoming(&[(var, self.block)]);
         }
-        self.variables.push(
-            phis.iter()
-                .map(|phi| phi.as_basic_value().into_int_value())
-                .collect(),
-        );
+        self.variables = phis
+            .iter()
+            .map(|phi| phi.as_basic_value().into_int_value())
+            .collect();
+        self.block = end;
     }
     pub fn add_eof<'b>(&'b mut self) -> () {
         if self.phis.len() > 0 {
             panic!("Too many opening while loops!")
-        }
-        if self.variables.len() > 1 {
-            panic!("ERROR stack frame NOT empty!")
         }
         let fun = self.context.void_type().fn_type(
             &[
@@ -173,7 +178,7 @@ impl<'a> Converter<'a> {
                     .i8_type()
                     .ptr_type(AddressSpace::Generic)
                     .into(),
-                self.context.i64_type().into(),
+                self.l64.into(),
             ],
             false,
         );
@@ -184,16 +189,17 @@ impl<'a> Converter<'a> {
                 .build_global_string_ptr(format!("{}: %lld\n", var.0).as_str(), "");
             self.builder.build_call(
                 printf,
-                &[
-                    fmt.as_pointer_value().into(),
-                    self.variables.pop().unwrap()[*var.1].into(),
-                ],
+                &[fmt.as_pointer_value().into(), self.variables[*var.1].into()],
                 "printf",
             );
         }
 
         self.builder.build_return(None);
-        self.module.verify().unwrap();
+
+        if let Err(e) = self.module.verify() {
+            eprintln!("{}", e.to_str().unwrap());
+            panic!("Module has errors");
+        }
     }
 
     pub fn run(&mut self) -> () {
@@ -201,7 +207,6 @@ impl<'a> Converter<'a> {
             .module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .expect("Unable to create execution engine");
-        self.module.print_to_stderr();
         unsafe {
             let main: JitFunction<unsafe extern "C" fn() -> ()> = execution_engine
                 .get_function("main")
@@ -235,16 +240,23 @@ impl<'a> Converter<'a> {
         target_machine
             .write_to_file(
                 &self.module,
-                inkwell::targets::FileType::Object,
-                &Path::new("./out.o"),
+                inkwell::targets::FileType::Assembly,
+                &Path::new("./out.s"),
             )
             .unwrap();
 
-        target_machine
-            .write_to_file(
-                &self.module,
-                inkwell::targets::FileType::Assembly,
-                &Path::new("./out.asm"),
+        let mut gcc = std::process::Command::new("gcc");
+        gcc.args(["-no-pie", "out.s", "-o", "bbvm.out"]);
+        if !gcc.status().expect("Failed to run GCC").success() {
+            panic!("GCC failed to compile the assembly code");
+        }
+
+        std::io::stdout()
+            .write_all(
+                &std::process::Command::new("./bbvm.out")
+                    .output()
+                    .expect("Failed to run compiled code")
+                    .stdout,
             )
             .unwrap();
     }
