@@ -159,6 +159,7 @@ pub enum OneParamType {
     Clear,
     Decr,
     Incr,
+    Input,
 }
 
 impl FromStr for OneParamType {
@@ -169,6 +170,7 @@ impl FromStr for OneParamType {
             "clear" => Ok(Self::Clear),
             "decr" => Ok(Self::Decr),
             "incr" => Ok(Self::Incr),
+            "input" => Ok(Self::Input),
             _ => Err(()),
         }
     }
@@ -189,11 +191,12 @@ impl<'a> StatementImpl<'a> for OneParam<'a> {
             OneParamType::Clear => cont.add_clear(self.one.ident),
             OneParamType::Decr => cont.add_decr(self.one.ident),
             OneParamType::Incr => cont.add_incr(self.one.ident),
+            OneParamType::Input => {}
         }
     }
 }
 
-statement_token!(["clear", "decr", "incr"], OneParam<'_>);
+statement_token!(["clear", "decr", "incr", "input"], OneParam<'_>);
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct Fluff {}

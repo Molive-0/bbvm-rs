@@ -20,7 +20,7 @@
                 }
             },
             "args": [
-                "test.bb"
+                "factorial.bb"
             ],
             "cwd": "${workspaceFolder}"
         },

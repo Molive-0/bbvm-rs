@@ -2,7 +2,7 @@
 
 use crate::convert::Converter;
 use crate::lexer::Lexer;
-use crate::token::{Statement, StatementImpl};
+use crate::token::{OneParamType, Statement, StatementImpl};
 use clap::{crate_authors, crate_description, crate_name, crate_version, App};
 use inkwell::context::Context;
 use std::fs;
@@ -38,7 +38,7 @@ fn main() -> () {
         tokens.push(statement);
     }
 
-    let variables: Vec<&str> = tokens
+    let mut variables: Vec<&str> = tokens
         .iter()
         .flat_map(|t| {
             use Statement::*;
@@ -52,8 +52,27 @@ fn main() -> () {
             }
         })
         .collect();
+
+    variables.sort();
+    variables.dedup();
+
+    let mut inputs: Vec<&str> = tokens
+        .iter()
+        .map(|t| match t {
+            Statement::OneParam(crate::token::OneParam {
+                one,
+                ty: OneParamType::Input,
+            }) => one.ident,
+            _ => "",
+        })
+        .filter(|x| !x.is_empty())
+        .collect();
+
+    inputs.sort();
+    inputs.dedup();
+
     let context = Context::create();
-    let mut converter = Converter::new(variables, &context);
+    let mut converter = Converter::new(variables, &inputs, &context);
 
     println!("Generating LLVM IR...");
     for statement in tokens {
@@ -68,6 +87,10 @@ fn main() -> () {
         }
     }
 
+    if converter.optimise() {
+        println!("Optimisations took place :)");
+    }
+
     let endtime1 = chrono::Utc::now();
     let duration = endtime1 - starttime;
 
@@ -77,18 +100,17 @@ fn main() -> () {
         duration.num_milliseconds()
     );
 
-    if compile {
+    let duration = if compile {
         println!("Running normal compiler...");
 
         converter.dump_code();
+        let endtime2 = chrono::Utc::now();
+        endtime2 - endtime1
     } else {
         println!("Running JIT compiler...");
 
-        converter.run();
-    }
-
-    let endtime2 = chrono::Utc::now();
-    let duration = endtime2 - endtime1;
+        converter.run(inputs)
+    };
 
     println!(
         "LLVM IR execution took {} nanoseconds ({} milliseconds).",

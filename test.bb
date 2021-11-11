@@ -1,14 +1,5 @@
-clear X;
-incr X;
-incr X;
-incr X;
-incr X;
-clear Y;
-incr Y;
-incr Y;
-incr Y;
-incr Y;
-incr Y;
+input X;
+input Y;
 clear Z;
 while X not 0 do;
     copy Y to W;

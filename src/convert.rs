@@ -1,11 +1,18 @@
-use std::{collections::HashMap, io::Write, iter::zip, path::Path};
+use std::{
+    collections::HashMap,
+    io::{stdin, stdout, Write},
+    iter::zip,
+    path::Path,
+};
 
+use chrono::Duration;
 use inkwell::{
     basic_block::BasicBlock,
     builder::Builder,
     context::Context,
     execution_engine::JitFunction,
     module::Module,
+    passes::{PassManager, PassManagerBuilder},
     targets::{InitializationConfig, Target, TargetMachine},
     types::IntType,
     values::{FunctionValue, IntValue, PhiValue},
@@ -29,27 +36,31 @@ pub struct Converter<'a> {
 }
 
 impl<'a> Converter<'a> {
-    pub fn new(varis: Vec<&'a str>, context: &'a Context) -> Converter<'a> {
+    pub fn new(varib: Vec<&'a str>, inputs: &Vec<&'a str>, context: &'a Context) -> Converter<'a> {
         let module: Module<'a> = context.create_module("bbvm");
         let l64 = context.i64_type();
         let one = l64.const_int(1, false);
         let zero = l64.const_zero();
-        let main = module.add_function("main", context.void_type().fn_type(&[], false), None);
+        let main = module.add_function(
+            "main",
+            context
+                .void_type()
+                .fn_type(&vec![l64.into(); inputs.len()], false),
+            None,
+        );
         let block = context.append_basic_block(main, "entry");
         let builder = context.create_builder();
         builder.position_at_end(block);
 
-        let mut varib = varis;
-        varib.sort();
-        varib.dedup();
-        let varib = varib;
-
-        let variables = vec![l64.const_int(0, false); varib.len()];
+        let mut variables = vec![l64.const_int(0, false); varib.len()];
 
         let phis = vec![];
         let mut mapping = HashMap::new();
         for v in varib.iter().enumerate() {
             mapping.insert(v.1.clone(), v.0);
+        }
+        for (input, param) in zip(inputs, main.get_params()) {
+            variables[mapping[input]] = param.into_int_value();
         }
         Converter {
             context,
@@ -202,16 +213,102 @@ impl<'a> Converter<'a> {
         }
     }
 
-    pub fn run(&mut self) -> () {
+    pub fn optimise(&mut self) -> bool {
+        let pm_builder = PassManagerBuilder::create();
+        pm_builder.set_optimization_level(OptimizationLevel::Aggressive);
+        let pass_manager = PassManager::create(());
+        pm_builder.populate_module_pass_manager(&pass_manager);
+        pass_manager.run_on(&self.module)
+    }
+
+    pub fn run(&mut self, inputs: Vec<&'a str>) -> Duration {
         let execution_engine = self
             .module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .expect("Unable to create execution engine");
         unsafe {
-            let main: JitFunction<unsafe extern "C" fn() -> ()> = execution_engine
-                .get_function("main")
-                .expect("Unable to load function");
-            main.call();
+            match inputs[..] {
+                [] => {
+                    println!("-----");
+
+                    let start = chrono::Utc::now();
+                    let main: JitFunction<'a, unsafe extern "C" fn() -> ()> = execution_engine
+                        .get_function("main")
+                        .expect("Unable to load function");
+                    main.call();
+                    println!("-----");
+                    chrono::Utc::now() - start
+                }
+                [a] => {
+                    println!("-----");
+                    print!("{}: ", a);
+                    stdout().flush().unwrap();
+                    let mut a = String::new();
+                    stdin().read_line(&mut a).unwrap();
+                    let a = a.trim().parse().unwrap();
+                    println!("-----");
+
+                    let start = chrono::Utc::now();
+                    let main: JitFunction<'a, unsafe extern "C" fn(u64) -> ()> = execution_engine
+                        .get_function("main")
+                        .expect("Unable to load function");
+                    main.call(a);
+                    println!("-----");
+                    chrono::Utc::now() - start
+                }
+                [a, b] => {
+                    println!("-----");
+                    print!("{}: ", a);
+                    stdout().flush().unwrap();
+                    let mut a = String::new();
+                    stdin().read_line(&mut a).unwrap();
+                    let a = a.trim().parse().unwrap();
+                    print!("{}: ", b);
+                    stdout().flush().unwrap();
+                    let mut b = String::new();
+                    stdin().read_line(&mut b).unwrap();
+                    let b = b.trim().parse().unwrap();
+                    println!("-----");
+
+                    let start = chrono::Utc::now();
+                    let main: JitFunction<'a, unsafe extern "C" fn(u64, u64) -> ()> =
+                        execution_engine
+                            .get_function("main")
+                            .expect("Unable to load function");
+                    main.call(a, b);
+                    println!("-----");
+                    chrono::Utc::now() - start
+                }
+                [a, b, c] => {
+                    println!("-----");
+                    print!("{}: ", a);
+                    stdout().flush().unwrap();
+                    let mut a = String::new();
+                    stdin().read_line(&mut a).unwrap();
+                    let a = a.trim().parse().unwrap();
+                    print!("{}: ", b);
+                    stdout().flush().unwrap();
+                    let mut b = String::new();
+                    stdin().read_line(&mut b).unwrap();
+                    let b = b.trim().parse().unwrap();
+                    print!("{}: ", c);
+                    stdout().flush().unwrap();
+                    let mut c = String::new();
+                    stdin().read_line(&mut c).unwrap();
+                    let c = c.trim().parse().unwrap();
+                    println!("-----");
+
+                    let start = chrono::Utc::now();
+                    let main: JitFunction<'a, unsafe extern "C" fn(u64, u64, u64) -> ()> =
+                        execution_engine
+                            .get_function("main")
+                            .expect("Unable to load function");
+                    main.call(a, b, c);
+                    println!("-----");
+                    chrono::Utc::now() - start
+                }
+                [..] => todo!(),
+            }
         }
     }
 
