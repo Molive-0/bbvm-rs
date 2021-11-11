@@ -8,3 +8,6 @@ A port of BBVM (https://github.com/Molive-0/bbvm) to rust
 
 ## notes
 Requires LLVM 12 to be available on the system.
+
+## todo
+work on the pass manager, to see if there is any optimisation that can be done
